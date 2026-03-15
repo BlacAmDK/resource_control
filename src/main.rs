@@ -16,10 +16,20 @@ fn main() {
 
     // RAM Control
     let handle = thread::spawn(move || {
-        let mut ram_pool = Ram::new();
+        let mut ram_pool = match Ram::new() {
+            Ok(ram) => ram,
+            Err(e) => {
+                eprintln!("Failed to initialize RAM controller: {:?}", e);
+                return;
+            }
+        };
+
         loop {
             thread::sleep(SLEEP_DURATION);
-            ram_pool.adjust();
+            if let Err(e) = ram_pool.adjust() {
+                eprintln!("RAM adjustment error: {:?}", e);
+                // Continue attempting to adjust despite errors
+            }
         }
     });
     handles.push(handle);
@@ -29,8 +39,9 @@ fn main() {
         // if cpu_id <= 1 {
         //     continue;
         // }
-        core_affinity::set_for_current(core_affinity::CoreId { id: cpu_id });
         let handle = thread::spawn(move || {
+            // Bind the current thread to the specific CPU core
+            core_affinity::set_for_current(core_affinity::CoreId { id: cpu_id });
             let mut system = System::new();
             system.refresh_cpu_usage();
             thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
@@ -42,11 +53,12 @@ fn main() {
                     let start = Instant::now();
                     while start.elapsed() < WORK_DURATION {
                         // Simulate some CPU-bound work
-                        let mut _sum = 0;
-                        for x in 1..100 {
-                            _sum += x;
-                            _sum -= x;
+                        let mut sum = 0u64;
+                        for x in 1..10000 {
+                            sum = sum.wrapping_add(x);
                         }
+                        // Prevent compiler optimization
+                        std::hint::black_box(sum);
                     }
                 } else {
                     // Sleep to reduce CPU usage
@@ -72,67 +84,122 @@ struct Ram {
     memory_one_percent: u64,
 }
 
+#[derive(Debug)]
+enum MemoryError {
+    DivisionByZero,
+    InvalidMemorySize,
+    Overflow,
+}
+
 impl Ram {
-    fn new() -> Ram {
+    fn new() -> Result<Ram, MemoryError> {
         let mut system = System::new();
         system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-        Ram {
+
+        let total_memory = system.total_memory();
+        if total_memory == 0 {
+            return Err(MemoryError::InvalidMemorySize);
+        }
+
+        let memory_one_percent = min(total_memory / 100, 1024 * 1024 * 1024); // 1% of total memory, max 1G
+        if memory_one_percent == 0 {
+            return Err(MemoryError::DivisionByZero);
+        }
+
+        let usage_percent = if total_memory > 0 {
+            system.used_memory() * 100 / total_memory
+        } else {
+            0
+        };
+
+        Ok(Ram {
             pool: Vec::with_capacity(
-                system.total_memory() as usize / 100 * TARGET_RAM_USAGE_RANGE.1 as usize,
+                (total_memory as usize / 100 * TARGET_RAM_USAGE_RANGE.1 as usize)
+                    .max(1),
             ),
             target_usage_range: TARGET_RAM_USAGE_RANGE,
             target_usage_range_mid: (TARGET_RAM_USAGE_RANGE.0 + TARGET_RAM_USAGE_RANGE.1) / 2,
-            usage_percent: system.used_memory() * 100 / system.total_memory(),
-            memory_one_percent: min(system.total_memory() / 100, 1024 * 1024 * 1024), // byte of 1% total_memory, 1G max
+            usage_percent,
+            memory_one_percent,
             system,
-        }
+        })
     }
     fn refresh(&mut self) {
         self.system
             .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-        self.usage_percent = self.system.used_memory() * 100 / self.system.total_memory();
+        let total_memory = self.system.total_memory();
+        let used_memory = self.system.used_memory();
+        self.usage_percent = if total_memory > 0 {
+            used_memory * 100 / total_memory
+        } else {
+            0
+        };
     }
-    fn adjust(&mut self) {
+
+    fn adjust(&mut self) -> Result<(), MemoryError> {
         self.refresh();
+
         if self.usage_percent >= self.target_usage_range.0
             && self.usage_percent <= self.target_usage_range.1
-        { // RAM usage in range, do nothing
-        } else if self.usage_percent < self.target_usage_range.0 {
-            // allocate ram(add 1% per call, up to 1G)
-            let diff = self.system.total_memory() / 100
-                * (self.target_usage_range_mid - self.usage_percent)
-                / self.memory_one_percent;
-            self.adjust_pool(diff.try_into().unwrap_or(0));
-            // println!("alloc--RAM:{}%, diff:{}", self.usage_percent, diff);
-        } else {
-            // free ram
-            let diff = self.system.total_memory() / 100
-                * (self.usage_percent - self.target_usage_range_mid)
-                / self.memory_one_percent;
-            self.adjust_pool(-(diff).try_into().unwrap_or(0));
-            // println!("free--RAM:{}%, diff:{}", self.usage_percent, diff);
+        {
+            // RAM usage in range, do nothing
+            return Ok(());
         }
+
+        // 使用 i64 进行计算以避免溢出
+        let target_diff = if self.usage_percent < self.target_usage_range.0 {
+            // Need to allocate: target_mid - current_usage (positive)
+            (self.target_usage_range_mid as i64) - (self.usage_percent as i64)
+        } else {
+            // Need to free: current_usage - target_mid (negative)
+            (self.usage_percent as i64) - (self.target_usage_range_mid as i64)
+        };
+
+        // 计算需要调整的字节数: total_memory * target_diff / 100
+        let total_memory_i64 = self.system.total_memory() as i64;
+        let diff_bytes = total_memory_i64
+            .saturating_mul(target_diff)
+            .checked_div(100)
+            .ok_or(MemoryError::Overflow)?;
+
+        // 转换为需要调整的内存块数
+        let memory_one_percent_i64 = self.memory_one_percent as i64;
+        let diff_blocks = diff_bytes
+            .checked_div(memory_one_percent_i64)
+            .ok_or(MemoryError::DivisionByZero)?;
+
+        self.adjust_pool(diff_blocks)?;
+
+        Ok(())
     }
-    fn adjust_pool(&mut self, multiplier: i32) {
-        // if need allocate ram(multiplier>0), only allocate 1%
-        // if need free ram(multiplier<0), free -multiplier times
+
+    fn adjust_pool(&mut self, multiplier: i64) -> Result<(), MemoryError> {
         if multiplier > 0 {
-            if let Some(block) = self.pool.first() {
-                self.pool.push(block.clone());
-            } else {
-                let size: u32 = (self.memory_one_percent / 4)
-                    .try_into()
-                    .unwrap_or(1024 * 1024 * 200 / 4); // size of 1% memory u32
-                let mut ram = Vec::with_capacity(size as usize);
-                for i in 0..size {
-                    ram.push(i);
+            // Need to allocate memory
+            let blocks_to_allocate = (multiplier as usize).min(100); // Limit to max 100 blocks per adjustment
+
+            for _ in 0..blocks_to_allocate {
+                if let Some(block) = self.pool.first() {
+                    self.pool.push(block.clone());
+                } else {
+                    // Allocate initial block (1% of memory)
+                    let size = (self.memory_one_percent / 4) as usize;
+                    if size == 0 {
+                        return Err(MemoryError::InvalidMemorySize);
+                    }
+                    let ram = vec![0u32; size];
+                    self.pool.push(ram);
                 }
-                self.pool.push(ram);
             }
         } else if multiplier < 0 && !self.pool.is_empty() {
-            for _ in 0..(-multiplier) {
+            // Need to free memory
+            let blocks_to_free = (-multiplier as usize).min(self.pool.len());
+
+            for _ in 0..blocks_to_free {
                 self.pool.pop();
             }
         }
+
+        Ok(())
     }
 }

@@ -1,7 +1,7 @@
 use std::cmp::min;
 use std::thread;
 use std::time::{Duration, Instant};
-use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, MemoryRefreshKind, System};
+use sysinfo::{MemoryRefreshKind, System, MINIMUM_CPU_UPDATE_INTERVAL};
 
 #[global_allocator]
 static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
@@ -97,25 +97,15 @@ impl Ram {
         system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
 
         let total_memory = system.total_memory();
-        if total_memory == 0 {
-            return Err(MemoryError::InvalidMemorySize);
-        }
-
         let memory_one_percent = min(total_memory / 100, 1024 * 1024 * 1024); // 1% of total memory, max 1G
         if memory_one_percent == 0 {
-            return Err(MemoryError::DivisionByZero);
+            return Err(MemoryError::InvalidMemorySize);
         }
-
-        let usage_percent = if total_memory > 0 {
-            system.used_memory() * 100 / total_memory
-        } else {
-            0
-        };
+        let usage_percent = system.used_memory() * 100 / total_memory;
 
         Ok(Ram {
             pool: Vec::with_capacity(
-                (total_memory as usize / 100 * TARGET_RAM_USAGE_RANGE.1 as usize)
-                    .max(1),
+                (total_memory as usize / 100 * TARGET_RAM_USAGE_RANGE.1 as usize).max(1),
             ),
             target_usage_range: TARGET_RAM_USAGE_RANGE,
             target_usage_range_mid: (TARGET_RAM_USAGE_RANGE.0 + TARGET_RAM_USAGE_RANGE.1) / 2,

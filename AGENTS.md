@@ -79,6 +79,14 @@ cargo check                   # Quick syntax/type check
 
 ## Code Style Guidelines
 
+### Philosophy Principles
+When modifying logic/backend code, follow these principles:
+- **Early Exit**: Use guard clauses for edge cases at the top of functions
+- **Parse Don't Validate**: Let data flow naturally; avoid redundant validation
+- **Atomic Predictability**: Prefer pure expressions over imperative statements
+- **Fail Fast**: Let overflow/division errors halt with descriptive messages
+- **Intentional Naming**: Use comments to explain "why", not "what"
+
 ### 1. Imports
 Use qualified imports for clarity:
 ```rust
@@ -104,9 +112,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AppError {
-    #[error("Memory operation failed: {0}")]
-    Memory(String),
-
     #[error("CPU operation failed: {0}")]
     Cpu(String),
 
@@ -160,21 +165,18 @@ let sum: u64 = 0;
 ### 8. Safety and Edge Cases
 Prevent overflow and division by zero:
 ```rust
-// Use checked_div for fallible division
-let diff_bytes = total_memory_i64
-    .saturating_mul(target_diff)
-    .checked_div(100)
-    .ok_or(AppError::Overflow)?;
-
-// Guard against zero
+// Guard against zero denominator
 if total_memory > 0 {
     self.usage_percent = used_memory * 100 / total_memory;
 }
+
+// Use saturating arithmetic for bounds safety
+let adjustment = used_memory.saturating_add(adjustment_bytes);
 ```
 
 Key practices:
-- Use `checked_div` instead of `/` for potentially zero denominators
-- Use `saturating_mul` to prevent overflow
+- Guard against zero before division
+- Use `saturating_add/sub` to prevent overflow
 - Use `wrapping_add` when overflow is acceptable
 - Handle edge cases explicitly (zero memory, empty pools)
 - Limit per-iteration adjustments

@@ -4,9 +4,6 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum AppError {
-    #[error("Memory operation failed: {0}")]
-    Memory(String),
-
     #[error("CPU operation failed: {0}")]
     Cpu(String),
 

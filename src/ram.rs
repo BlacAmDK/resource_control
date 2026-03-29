@@ -74,11 +74,6 @@ impl RamController {
         }
     }
 
-    /// Returns the current memory usage percentage.
-    pub fn usage_percent(&self) -> u64 {
-        self.usage_percent
-    }
-
     /// Adjusts memory usage to stay within target range.
     pub fn adjust(&mut self) -> Result<AdjustResult, AppError> {
         self.refresh();
@@ -175,12 +170,6 @@ mod tests {
         assert_eq!(controller.target_range, (45, 55));
         assert_eq!(controller.target_mid, 50);
         assert_eq!(controller.usage_percent, 40);
-    }
-
-    #[test]
-    fn test_usage_percent_getter() {
-        let controller = RamController::with_test_values((45, 55), 1_000_000, 50);
-        assert_eq!(controller.usage_percent(), 50);
     }
 
     #[test]

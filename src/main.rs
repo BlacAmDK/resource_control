@@ -1,195 +1,87 @@
-use std::cmp::min;
-use std::thread;
-use std::time::{Duration, Instant};
-use sysinfo::{MemoryRefreshKind, System, MINIMUM_CPU_UPDATE_INTERVAL};
+//! Resource Control - Server CPU and Memory Usage Controller
+//!
+//! This program maintains server CPU and memory usage within configurable
+//! target ranges by spawning control threads for each resource.
 
-#[global_allocator]
-static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;
+mod cpu;
+mod error;
+mod ram;
 
-const TARGET_CPU_USAGE: f32 = 55.0; // Target CPU usage percentage
-const TARGET_RAM_USAGE_RANGE: (u64, u64) = (45, 55); // Target RAM usage percentage range
-const WORK_DURATION: Duration = MINIMUM_CPU_UPDATE_INTERVAL; // Duration of work
-const SLEEP_DURATION: Duration = MINIMUM_CPU_UPDATE_INTERVAL; // Duration of sleep
+use clap::Parser;
+use cpu::spawn_cpu_threads;
+use ram::spawn_ram_thread;
+
+/// CLI arguments for resource control.
+#[derive(Parser, Debug)]
+#[command(
+    name = "resource_control",
+    about = "Control server CPU and memory usage"
+)]
+struct Args {
+    /// Target CPU usage percentage (0-100)
+    #[arg(short, long, default_value_t = 55.0)]
+    cpu_target: f32,
+
+    /// Minimum RAM usage percentage (0-100)
+    #[arg(short = 'l', long, default_value_t = 45)]
+    ram_min: u64,
+
+    /// Maximum RAM usage percentage (0-100)
+    #[arg(short = 'u', long, default_value_t = 55)]
+    ram_max: u64,
+
+    /// Enable verbose logging
+    #[arg(short, long)]
+    verbose: bool,
+}
 
 fn main() {
-    let mut handles = vec![];
+    let args = Args::parse();
 
-    // RAM Control
-    let handle = thread::spawn(move || {
-        let mut ram_pool = match Ram::new() {
-            Ok(ram) => ram,
-            Err(e) => {
-                eprintln!("Failed to initialize RAM controller: {:?}", e);
-                return;
-            }
-        };
-
-        loop {
-            thread::sleep(SLEEP_DURATION);
-            if let Err(e) = ram_pool.adjust() {
-                eprintln!("RAM adjustment error: {:?}", e);
-                // Continue attempting to adjust despite errors
-            }
-        }
-    });
-    handles.push(handle);
-
-    // CPU Control
-    for cpu_id in 0..System::new_all().cpus().len() {
-        // if cpu_id <= 1 {
-        //     continue;
-        // }
-        let handle = thread::spawn(move || {
-            // Bind the current thread to the specific CPU core
-            core_affinity::set_for_current(core_affinity::CoreId { id: cpu_id });
-            let mut system = System::new();
-            system.refresh_cpu_usage();
-            thread::sleep(MINIMUM_CPU_UPDATE_INTERVAL);
-            loop {
-                system.refresh_cpu_usage();
-                let cpu_usage = system.cpus()[cpu_id].cpu_usage();
-                if cpu_usage < TARGET_CPU_USAGE {
-                    // println!("CPU{} is Working", cpu_id);
-                    let start = Instant::now();
-                    while start.elapsed() < WORK_DURATION {
-                        // Simulate some CPU-bound work
-                        let mut sum = 0u64;
-                        for x in 1..10000 {
-                            sum = sum.wrapping_add(x);
-                        }
-                        // Prevent compiler optimization
-                        std::hint::black_box(sum);
-                    }
-                } else {
-                    // Sleep to reduce CPU usage
-                    thread::sleep(SLEEP_DURATION);
-                }
-            }
-        });
-        handles.push(handle);
+    // Validate arguments
+    if args.cpu_target > 100.0 || args.cpu_target < 0.0 {
+        eprintln!("Error: cpu_target must be between 0 and 100");
+        std::process::exit(1);
     }
 
-    // Wait for all threads to finish (they won't in this infinite loop)
+    if args.ram_min >= args.ram_max || args.ram_max > 100 {
+        eprintln!("Error: ram_min must be less than ram_max, and ram_max must be <= 100");
+        std::process::exit(1);
+    }
+
+    if args.verbose {
+        println!(
+            "Starting resource control: CPU target={}%, RAM range={}-{}%",
+            args.cpu_target, args.ram_min, args.ram_max
+        );
+    }
+
+    let mut handles = vec![];
+
+    // Spawn RAM control thread
+    match spawn_ram_thread((args.ram_min, args.ram_max)) {
+        Ok(handle) => handles.push(handle),
+        Err(e) => {
+            eprintln!("Failed to spawn RAM thread: {:?}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // Spawn CPU control threads
+    match spawn_cpu_threads(args.cpu_target) {
+        Ok(cpu_handles) => handles.extend(cpu_handles),
+        Err(e) => {
+            eprintln!("Failed to spawn CPU threads: {:?}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // Wait for all threads (they run indefinitely)
     for handle in handles {
         let _ = handle.join();
     }
 }
 
-struct Ram {
-    pool: Vec<Vec<u32>>,
-    system: System,
-    target_usage_range: (u64, u64),
-    target_usage_range_mid: u64,
-    usage_percent: u64,
-    memory_one_percent: u64,
-}
-
-#[derive(Debug)]
-enum MemoryError {
-    DivisionByZero,
-    InvalidMemorySize,
-    Overflow,
-}
-
-impl Ram {
-    fn new() -> Result<Ram, MemoryError> {
-        let mut system = System::new();
-        system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-
-        let total_memory = system.total_memory();
-        let memory_one_percent = min(total_memory / 100, 1024 * 1024 * 1024); // 1% of total memory, max 1G
-        if memory_one_percent == 0 {
-            return Err(MemoryError::InvalidMemorySize);
-        }
-        let usage_percent = system.used_memory() * 100 / total_memory;
-
-        Ok(Ram {
-            pool: Vec::with_capacity(
-                (total_memory as usize / 100 * TARGET_RAM_USAGE_RANGE.1 as usize).max(1),
-            ),
-            target_usage_range: TARGET_RAM_USAGE_RANGE,
-            target_usage_range_mid: (TARGET_RAM_USAGE_RANGE.0 + TARGET_RAM_USAGE_RANGE.1) / 2,
-            usage_percent,
-            memory_one_percent,
-            system,
-        })
-    }
-    fn refresh(&mut self) {
-        self.system
-            .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-        let total_memory = self.system.total_memory();
-        let used_memory = self.system.used_memory();
-        self.usage_percent = if total_memory > 0 {
-            used_memory * 100 / total_memory
-        } else {
-            0
-        };
-    }
-
-    fn adjust(&mut self) -> Result<(), MemoryError> {
-        self.refresh();
-
-        if self.usage_percent >= self.target_usage_range.0
-            && self.usage_percent <= self.target_usage_range.1
-        {
-            // RAM usage in range, do nothing
-            return Ok(());
-        }
-
-        // 使用 i64 进行计算以避免溢出
-        let target_diff = if self.usage_percent < self.target_usage_range.0 {
-            // Need to allocate: target_mid - current_usage (positive)
-            (self.target_usage_range_mid as i64) - (self.usage_percent as i64)
-        } else {
-            // Need to free: current_usage - target_mid (negative)
-            (self.usage_percent as i64) - (self.target_usage_range_mid as i64)
-        };
-
-        // 计算需要调整的字节数: total_memory * target_diff / 100
-        let total_memory_i64 = self.system.total_memory() as i64;
-        let diff_bytes = total_memory_i64
-            .saturating_mul(target_diff)
-            .checked_div(100)
-            .ok_or(MemoryError::Overflow)?;
-
-        // 转换为需要调整的内存块数
-        let memory_one_percent_i64 = self.memory_one_percent as i64;
-        let diff_blocks = diff_bytes
-            .checked_div(memory_one_percent_i64)
-            .ok_or(MemoryError::DivisionByZero)?;
-
-        self.adjust_pool(diff_blocks)?;
-
-        Ok(())
-    }
-
-    fn adjust_pool(&mut self, multiplier: i64) -> Result<(), MemoryError> {
-        if multiplier > 0 {
-            // Need to allocate memory
-            let blocks_to_allocate = (multiplier as usize).min(100); // Limit to max 100 blocks per adjustment
-
-            for _ in 0..blocks_to_allocate {
-                if let Some(block) = self.pool.first() {
-                    self.pool.push(block.clone());
-                } else {
-                    // Allocate initial block (1% of memory)
-                    let size = (self.memory_one_percent / 4) as usize;
-                    if size == 0 {
-                        return Err(MemoryError::InvalidMemorySize);
-                    }
-                    let ram = vec![0u32; size];
-                    self.pool.push(ram);
-                }
-            }
-        } else if multiplier < 0 && !self.pool.is_empty() {
-            // Need to free memory
-            let blocks_to_free = (-multiplier as usize).min(self.pool.len());
-
-            for _ in 0..blocks_to_free {
-                self.pool.pop();
-            }
-        }
-
-        Ok(())
-    }
-}
+// Global jemalloc allocator
+#[global_allocator]
+static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;

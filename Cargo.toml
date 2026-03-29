@@ -1,9 +1,13 @@
 [package]
 name = "resource_control"
 version = "1.0.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+clap = { version = "4", features = ["derive"] }
 core_affinity = "0.8.3"
 jemallocator = "0.5.4"
 sysinfo = "0.38.4"
+thiserror = "1"
+
+[dev-dependencies]

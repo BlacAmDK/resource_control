@@ -8,6 +8,6 @@ clap = { version = "4", features = ["derive"] }
 core_affinity = "0.8.3"
 jemallocator = "0.5.4"
 sysinfo = "0.38.4"
-thiserror = "1"
+thiserror = "2"
 
 [dev-dependencies]

@@ -19,16 +19,12 @@ use ram::spawn_ram_thread;
 )]
 struct Args {
     /// Target CPU usage percentage (0-100)
-    #[arg(short, long, default_value_t = 55.0)]
+    #[arg(short, long, default_value_t = 50.0)]
     cpu_target: f32,
 
-    /// Minimum RAM usage percentage (0-100)
-    #[arg(short = 'l', long, default_value_t = 45)]
-    ram_min: u64,
-
-    /// Maximum RAM usage percentage (0-100)
-    #[arg(short = 'u', long, default_value_t = 55)]
-    ram_max: u64,
+    /// RAM usage range as "min-max" (e.g., "45-55")
+    #[arg(short = 'm', long, default_value = "45-55")]
+    ram: String,
 
     /// Enable verbose logging
     #[arg(short, long)]
@@ -44,22 +40,44 @@ fn main() {
         std::process::exit(1);
     }
 
-    if args.ram_min >= args.ram_max || args.ram_max > 100 {
-        eprintln!("Error: ram_min must be less than ram_max, and ram_max must be <= 100");
+    let ram_parts: Vec<&str> = args.ram.split('-').collect();
+    if ram_parts.len() != 2 {
+        eprintln!("Error: ram must be in format \"min-max\" (e.g., \"45-55\")");
+        std::process::exit(1);
+    }
+
+    let ram_min = match ram_parts[0].parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Error: invalid ram min value");
+            std::process::exit(1);
+        }
+    };
+
+    let ram_max = match ram_parts[1].parse::<u64>() {
+        Ok(v) => v,
+        Err(_) => {
+            eprintln!("Error: invalid ram max value");
+            std::process::exit(1);
+        }
+    };
+
+    if ram_min >= ram_max || ram_max > 100 {
+        eprintln!("Error: ram min must be less than ram max, and ram max must be <= 100");
         std::process::exit(1);
     }
 
     if args.verbose {
         println!(
             "Starting resource control: CPU target={}%, RAM range={}-{}%",
-            args.cpu_target, args.ram_min, args.ram_max
+            args.cpu_target, ram_min, ram_max
         );
     }
 
     let mut handles = vec![];
 
     // Spawn RAM control thread
-    match spawn_ram_thread((args.ram_min, args.ram_max)) {
+    match spawn_ram_thread((ram_min, ram_max)) {
         Ok(handle) => handles.push(handle),
         Err(e) => {
             eprintln!("Failed to spawn RAM thread: {:?}", e);

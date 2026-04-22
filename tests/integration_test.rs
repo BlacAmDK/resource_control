@@ -1,5 +1,6 @@
 //! Integration tests for CLI argument parsing.
 
+use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
 
 #[test]
@@ -34,10 +35,43 @@ fn test_invalid_cpu_target() {
 #[test]
 fn test_invalid_ram_range() {
     let output = Command::new("cargo")
-        .args(["run", "--", "-l", "60", "-u", "50"])
+        .args(["run", "--", "--ram", "60-50"])
         .output()
         .expect("Failed to run cargo");
 
     // Should fail with error (min >= max)
     assert!(!output.status.success() || String::from_utf8_lossy(&output.stderr).contains("Error"));
+}
+
+#[test]
+fn test_help_shows_nice() {
+    let output = Command::new("cargo")
+        .args(["run", "--", "--help"])
+        .output()
+        .expect("Failed to run cargo");
+
+    let combined = format!(
+        "{}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+
+    assert!(
+        combined.contains("--nice") || combined.contains("nice"),
+        "Help text should mention --nice argument"
+    );
+}
+
+#[test]
+fn test_valid_ram_range_no_error() {
+    let mut child = Command::new("cargo")
+        .args(["run", "--", "--ram", "30-70"])
+        .spawn()
+        .expect("Failed to run cargo");
+
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let _ = child.kill();
+
+    let status = child.wait().expect("Failed to wait");
+    // Process killed by us, not crashed
+    assert!(status.signal().is_some() || status.success());
 }

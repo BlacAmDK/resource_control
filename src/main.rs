@@ -10,6 +10,7 @@ mod ram;
 use clap::Parser;
 use cpu::spawn_cpu_threads;
 use ram::spawn_ram_thread;
+use rustix::process::setpriority_process;
 
 /// CLI arguments for resource control.
 #[derive(Parser, Debug)]
@@ -29,10 +30,22 @@ struct Args {
     /// Enable verbose logging
     #[arg(short, long)]
     verbose: bool,
+
+    /// Nice value (0-19, higher = lower priority)
+    #[arg(short, long, default_value_t = 19)]
+    nice: i32,
 }
 
 fn main() {
     let args = Args::parse();
+
+    // Set nice value for lower priority
+    match setpriority_process(None, args.nice) {
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("Warning: failed to set nice value: {}", e);
+        }
+    }
 
     // Validate arguments
     if args.cpu_target > 100.0 || args.cpu_target < 0.0 {

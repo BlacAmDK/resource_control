@@ -24,6 +24,9 @@ cargo run --release -- --cpu-target 60 --ram 40-60
 # 启用详细日志
 cargo run --release -- --verbose
 
+# 设置 nice 值（默认 19，最低优先级）
+cargo run --release -- --nice 15
+
 # 查看帮助
 cargo run --release -- --help
 ```
@@ -33,8 +36,9 @@ cargo run --release -- --help
 | 参数 | 描述 | 默认值 |
 |------|------|--------|
 | `-c`, `--cpu-target` | CPU 目标使用率 (0-100) | 50 |
-| `-r`, `--ram` | 内存使用范围 "min-max" | 45-55 |
+| `-m`, `--ram` | 内存使用范围 "min-max" | 45-55 |
 | `-v`, `--verbose` | 启用详细日志 | false |
+| `-n`, `--nice` | Nice 值 (0-19，越高优先级越低) | 19 |
 
 ### 后台运行
 

@@ -67,3 +67,9 @@ cargo test <name>       # 运行指定测试
 cargo clippy           # Linter
 cargo fmt              # 格式化
 ```
+
+## TODO
+
+- [ ] 单实例保护（pid 文件）
+- [ ] 自动后台运行（daemonize）
+- [ ] 日志输出到文件

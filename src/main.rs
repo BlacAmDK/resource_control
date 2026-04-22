@@ -27,13 +27,13 @@ struct Args {
     #[arg(short = 'm', long, default_value = "45-55")]
     ram: String,
 
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
-
     /// Nice value (0-19, higher = lower priority)
     #[arg(short, long, default_value_t = 19)]
     nice: i32,
+
+    /// Enable verbose logging
+    #[arg(short, long)]
+    verbose: bool,
 }
 
 fn main() {
@@ -82,8 +82,8 @@ fn main() {
 
     if args.verbose {
         println!(
-            "Starting resource control: CPU target={}%, RAM range={}-{}%",
-            args.cpu_target, ram_min, ram_max
+            "Starting resource control: CPU target={}%, RAM range={}-{}%, nice={}",
+            args.cpu_target, ram_min, ram_max, args.nice
         );
     }
 

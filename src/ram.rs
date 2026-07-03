@@ -16,6 +16,7 @@ pub struct RamController {
     target_range: (u64, u64),
     target_mid: u64,
     usage_percent: u64,
+    system: System,
 }
 
 /// Result of an adjustment operation.
@@ -55,6 +56,7 @@ impl RamController {
             target_mid: (target_range.0 + target_range.1) / 2,
             usage_percent,
             memory_one_percent,
+            system,
         })
     }
 
@@ -71,6 +73,7 @@ impl RamController {
             target_mid: (target_range.0 + target_range.1) / 2,
             usage_percent,
             memory_one_percent,
+            system: System::new(),
         }
     }
 
@@ -93,9 +96,8 @@ impl RamController {
     }
 
     fn refresh(&mut self) {
-        let mut system = System::new();
-        system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
-        self.usage_percent = Self::calculate_usage_percent(&system);
+        self.system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        self.usage_percent = Self::calculate_usage_percent(&self.system);
     }
 
     fn calculate_usage_percent(system: &System) -> u64 {
@@ -111,13 +113,13 @@ impl RamController {
     fn adjust_pool(&mut self, blocks: i64) {
         if blocks > 0 {
             let blocks_to_allocate = (blocks as usize).min(100);
+            let size = (self.memory_one_percent / 4) as usize;
             for _ in 0..blocks_to_allocate {
-                if let Some(first) = self.pool.first() {
-                    self.pool.push(first.clone());
-                } else {
-                    let size = (self.memory_one_percent / 4) as usize;
-                    self.pool.push(vec![0u32; size]);
+                let mut v = vec![0u32; size];
+                for i in (0..size).step_by(1024) {
+                    v[i] = 0;
                 }
+                self.pool.push(v);
             }
         } else if blocks < 0 && !self.pool.is_empty() {
             let blocks_to_free = ((-blocks) as usize).min(self.pool.len());

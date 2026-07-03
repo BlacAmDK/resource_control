@@ -74,9 +74,10 @@ impl CpuController {
 
             // 计算工作比例
             // 上限：min(target * 1.5, 100%)，允许短时超调以快速逼近目标
-            // 下限：min(target * 1.5, 5%)，确保不会因 target 过低导致 min > max
-            let mut work_ratio = (base_ratio + adjustment)
-                .clamp((base_ratio * 1.5).min(0.05), (base_ratio * 1.5).min(1.0));
+            // 下限：max(target * 0.5, 0%)，确保下界不超过上界
+            let upper = (base_ratio * 1.5).min(1.0);
+            let lower = (base_ratio * 0.5).max(0.0).min(upper);
+            let mut work_ratio = (base_ratio + adjustment).clamp(lower, upper);
 
             // 如果连续 3 个周期高于目标，强制让出所有 CPU 资源
             if self.consecutive_over_target >= 3 {

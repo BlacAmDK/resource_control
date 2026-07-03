@@ -12,23 +12,20 @@
 ### 默认运行
 
 ```bash
-cargo run --release
+resource_control
 ```
 
 ### 自定义参数
 
 ```bash
 # 设置 CPU 目标为 60%，内存范围 40-60%
-cargo run --release -- --cpu-target 60 --ram 40-60
+resource_control --cpu-target 60 --ram 40-60
 
 # 设置 nice 值（默认 19，最低优先级）
-cargo run --release -- --nice 15
-
-# 启用详细日志
-cargo run --release -- --verbose
+resource_control --nice 15
 
 # 查看帮助
-cargo run --release -- --help
+resource_control --help
 ```
 
 ### CLI 参数
@@ -38,38 +35,13 @@ cargo run --release -- --help
 | `-c`, `--cpu-target` | CPU 目标使用率 (0-100) | 50 |
 | `-m`, `--ram` | 内存使用范围 "min-max" | 45-55 |
 | `-n`, `--nice` | Nice 值 (0-19，越高优先级越低) | 19 |
-| `-v`, `--verbose` | 启用详细日志 | false |
+| `--stop` | 停止正在运行的实例 | false |
 
-### 后台运行
-
-```bash
-nohup ./target/release/resource_control &
-```
-
-## 开发
-
-### 构建
+程序默认以守护进程模式在后台运行。
 
 ```bash
-cargo build --release
+resource_control
+resource_control --stop                        # 停止
 ```
 
-### 测试
 
-```bash
-cargo test              # 运行所有测试
-cargo test <name>       # 运行指定测试
-```
-
-### 代码检查
-
-```bash
-cargo clippy           # Linter
-cargo fmt              # 格式化
-```
-
-## TODO
-
-- [ ] 单实例保护（pid 文件）
-- [ ] 自动后台运行（daemonize）
-- [ ] 日志输出到文件

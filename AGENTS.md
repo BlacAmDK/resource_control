@@ -23,6 +23,7 @@ tests/
 - **core_affinity**: CPU core binding
 - **jemallocator**: Global memory allocator
 - **thiserror**: Error type derivation
+- **daemonize**: Daemonization (double-fork, PID file, flock)
 
 ## CLI Usage
 
@@ -33,13 +34,14 @@ Options:
   -c, --cpu-target <FLOAT>  Target CPU usage percentage (default: 50.0)
   -m, --ram <STRING>        RAM usage range "min-max" (default: "45-55")
   -n, --nice <INT>          Nice value 0-19 (default: 19)
-  -v, --verbose              Enable verbose logging
+      --stop                Stop the running instance
   -h, --help                 Print help
 ```
 
-Example:
+Examples:
 ```bash
-cargo run -- --cpu-target 60 --ram 40-60 --verbose
+cargo run -- --cpu-target 60 --ram 40-60              # background daemon
+cargo run -- --stop                                    # stop running instance
 ```
 
 ## Build/Lint/Test Commands

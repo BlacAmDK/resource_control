@@ -7,10 +7,15 @@ mod cpu;
 mod error;
 mod ram;
 
+use std::path::Path;
+use std::time::Duration;
 use clap::Parser;
 use cpu::spawn_cpu_threads;
+use daemonize::Daemonize;
 use ram::spawn_ram_thread;
 use rustix::process::setpriority_process;
+
+const PID_FILE: &str = "/tmp/resource_control.pid";
 
 /// CLI arguments for resource control.
 #[derive(Parser, Debug)]
@@ -31,23 +36,65 @@ struct Args {
     #[arg(short, long, default_value_t = 19)]
     nice: i32,
 
-    /// Enable verbose logging
-    #[arg(short, long)]
-    verbose: bool,
+    /// Stop the running instance
+    #[arg(long)]
+    stop: bool,
+}
+
+fn stop_instance() {
+    let contents = std::fs::read_to_string(PID_FILE).unwrap_or_else(|_| {
+        eprintln!("Error: no running instance found");
+        std::process::exit(1);
+    });
+
+    let pid = contents.trim().parse::<u32>().unwrap_or_else(|_| {
+        eprintln!("Error: invalid PID file");
+        std::process::exit(1);
+    });
+
+    let proc_path = format!("/proc/{}", pid);
+    if !Path::new(&proc_path).exists() {
+        let _ = std::fs::remove_file(PID_FILE);
+        eprintln!("Error: no running instance found (stale PID file removed)");
+        std::process::exit(1);
+    }
+
+    println!("Stopping instance PID {}", pid);
+
+    let status = std::process::Command::new("kill")
+        .arg(pid.to_string())
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to execute kill: {}", e);
+            std::process::exit(1);
+        });
+
+    if !status.success() {
+        eprintln!("Error: failed to stop process {}", pid);
+        std::process::exit(1);
+    }
+
+    std::thread::sleep(Duration::from_secs(2));
+
+    if Path::new(&proc_path).exists() {
+        println!("Process still running, sending SIGKILL");
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+
+    let _ = std::fs::remove_file(PID_FILE);
+    println!("Stopped");
 }
 
 fn main() {
     let args = Args::parse();
 
-    // Set nice value for lower priority
-    match setpriority_process(None, args.nice) {
-        Ok(_) => {}
-        Err(e) => {
-            eprintln!("Warning: failed to set nice value: {}", e);
-        }
+    if args.stop {
+        stop_instance();
+        return;
     }
 
-    // Validate arguments
     if args.cpu_target > 100.0 || args.cpu_target < 0.0 {
         eprintln!("Error: cpu_target must be between 0 and 100");
         std::process::exit(1);
@@ -59,37 +106,41 @@ fn main() {
         std::process::exit(1);
     }
 
-    let ram_min = match ram_parts[0].parse::<u64>() {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("Error: invalid ram min value");
-            std::process::exit(1);
-        }
-    };
+    let ram_min: u64 = ram_parts[0].parse().unwrap_or_else(|_| {
+        eprintln!("Error: invalid ram min value");
+        std::process::exit(1);
+    });
 
-    let ram_max = match ram_parts[1].parse::<u64>() {
-        Ok(v) => v,
-        Err(_) => {
-            eprintln!("Error: invalid ram max value");
-            std::process::exit(1);
-        }
-    };
+    let ram_max: u64 = ram_parts[1].parse().unwrap_or_else(|_| {
+        eprintln!("Error: invalid ram max value");
+        std::process::exit(1);
+    });
 
     if ram_min >= ram_max || ram_max > 100 {
         eprintln!("Error: ram min must be less than ram max, and ram max must be <= 100");
         std::process::exit(1);
     }
 
-    if args.verbose {
-        println!(
-            "Starting resource control: CPU target={}%, RAM range={}-{}%, nice={}",
-            args.cpu_target, ram_min, ram_max, args.nice
-        );
-    }
+    println!(
+        "Starting resource control: CPU target={}%, RAM range={}-{}%, nice={}",
+        args.cpu_target, ram_min, ram_max, args.nice
+    );
+
+    Daemonize::new()
+        .pid_file(PID_FILE)
+        .start()
+        .unwrap_or_else(|_| {
+            eprintln!("Error: another instance is already running");
+            eprintln!("Hint: use --stop to stop the running instance");
+            std::process::exit(1);
+        });
+
+    setpriority_process(None, args.nice).unwrap_or_else(|e| {
+        eprintln!("Warning: failed to set nice value: {}", e);
+    });
 
     let mut handles = vec![];
 
-    // Spawn RAM control thread
     match spawn_ram_thread((ram_min, ram_max)) {
         Ok(handle) => handles.push(handle),
         Err(e) => {
@@ -98,7 +149,6 @@ fn main() {
         }
     }
 
-    // Spawn CPU control threads
     match spawn_cpu_threads(args.cpu_target) {
         Ok(cpu_handles) => handles.extend(cpu_handles),
         Err(e) => {
@@ -107,12 +157,10 @@ fn main() {
         }
     }
 
-    // Wait for all threads (they run indefinitely)
     for handle in handles {
         let _ = handle.join();
     }
 }
 
-// Global jemalloc allocator
 #[global_allocator]
 static GLOBAL: jemallocator::Jemalloc = jemallocator::Jemalloc;

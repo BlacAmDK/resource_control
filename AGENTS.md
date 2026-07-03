@@ -30,16 +30,16 @@ tests/
 cargo run -- [--OPTIONS]
 
 Options:
-  -c, --cpu-target <FLOAT>  Target CPU usage percentage (default: 55.0)
-  -l, --ram-min <UINT>      Minimum RAM usage percentage (default: 45)
-  -u, --ram-max <UINT>       Maximum RAM usage percentage (default: 55)
+  -c, --cpu-target <FLOAT>  Target CPU usage percentage (default: 50.0)
+  -m, --ram <STRING>        RAM usage range "min-max" (default: "45-55")
+  -n, --nice <INT>          Nice value 0-19 (default: 19)
   -v, --verbose              Enable verbose logging
   -h, --help                 Print help
 ```
 
 Example:
 ```bash
-cargo run -- --cpu-target 60 -l 40 -u 60 --verbose
+cargo run -- --cpu-target 60 --ram 40-60 --verbose
 ```
 
 ## Build/Lint/Test Commands
@@ -103,7 +103,7 @@ use crate::error::AppError;
 | Types/Structs/Enums | PascalCase | `AppError`, `RamController` |
 | Functions/Methods | snake_case | `adjust()`, `refresh()` |
 | Variables | snake_case | `ram_pool`, `cpu_usage` |
-| CLI Arguments | kebab-case | `cpu-target`, `ram-min` |
+| CLI Arguments | kebab-case | `cpu-target`, `ram` |
 
 ### 3. Error Handling
 Use `thiserror` for error types:

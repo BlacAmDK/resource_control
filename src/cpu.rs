@@ -47,9 +47,7 @@ impl CpuController {
             // 追踪连续高于目标的周期数，用于强制让出
             // 限制最大值防止溢出，锁定后不再累加
             if error < 0.0 {
-                if self.consecutive_over_target < u32::MAX {
-                    self.consecutive_over_target += 1;
-                }
+                self.consecutive_over_target = self.consecutive_over_target.saturating_add(1);
             } else {
                 self.consecutive_over_target = 0;
             }

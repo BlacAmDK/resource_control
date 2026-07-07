@@ -3,7 +3,6 @@
 //! Manages memory usage by allocating/deallocating memory blocks
 //! to keep usage within a target range.
 
-use std::cmp::min;
 use sysinfo::{MemoryRefreshKind, System};
 
 use crate::error::AppError;
@@ -17,6 +16,7 @@ pub struct RamController {
     target_mid: u64,
     usage_percent: u64,
     system: System,
+    last_total_memory: u64,
 }
 
 /// Result of an adjustment operation.
@@ -40,7 +40,7 @@ impl RamController {
         system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
 
         let total_memory = system.total_memory();
-        let memory_one_percent = min(total_memory / 100, 1024 * 1024 * 1024);
+        let memory_one_percent = total_memory / 100;
 
         if memory_one_percent == 0 {
             return Err(AppError::InvalidArg("System has no memory".into()));
@@ -57,6 +57,7 @@ impl RamController {
             usage_percent,
             memory_one_percent,
             system,
+            last_total_memory: total_memory,
         })
     }
 
@@ -74,6 +75,7 @@ impl RamController {
             usage_percent,
             memory_one_percent,
             system: System::new(),
+            last_total_memory: 0,
         }
     }
 
@@ -97,17 +99,21 @@ impl RamController {
 
     fn refresh(&mut self) {
         self.system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+
+        // memory hotplug? free memory pool
+        if self.system.total_memory() != self.last_total_memory {
+            self.pool.clear();
+            self.last_total_memory = self.system.total_memory();
+            self.memory_one_percent = self.last_total_memory / 100;
+        }
+
         self.usage_percent = Self::calculate_usage_percent(&self.system);
     }
 
     fn calculate_usage_percent(system: &System) -> u64 {
         let total = system.total_memory();
         let used = system.used_memory();
-        if total > 0 {
-            used * 100 / total
-        } else {
-            0
-        }
+        (used * 100).checked_div(total).unwrap_or(100)
     }
 
     fn adjust_pool(&mut self, blocks: i64) {
@@ -157,6 +163,26 @@ pub fn spawn_ram_thread(target_range: (u64, u64)) -> Result<std::thread::JoinHan
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_total_memory_decrease_clears_pool() {
+        let mut controller = RamController::with_test_values((45, 55), 1_000_000, 50);
+        controller.last_total_memory = u64::MAX;
+        controller.pool.push(vec![0u32; 10]);
+        assert_eq!(controller.pool.len(), 1);
+        let _ = controller.refresh();
+        assert_eq!(controller.pool.len(), 0);
+    }
+
+    #[test]
+    fn test_total_memory_increase_clears_pool() {
+        let mut controller = RamController::with_test_values((45, 55), 1_000_000, 50);
+        controller.last_total_memory = 0;
+        controller.pool.push(vec![0u32; 10]);
+        assert_eq!(controller.pool.len(), 1);
+        let _ = controller.refresh();
+        assert_eq!(controller.pool.len(), 0);
+    }
 
     #[test]
     fn test_new_with_invalid_range() {

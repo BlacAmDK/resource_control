@@ -7,7 +7,7 @@ mod cpu;
 mod error;
 mod ram;
 
-use clap::Parser;
+use clap::{Args, Parser, Subcommand};
 use cpu::spawn_cpu_threads;
 use daemonize::Daemonize;
 use ram::spawn_ram_thread;
@@ -15,15 +15,39 @@ use rustix::process::setpriority_process;
 use std::path::Path;
 use std::time::Duration;
 
+/// Returns the running binary's name (e.g. "resource_control").
+fn program_name() -> String {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_else(|| "resource_control".to_string())
+}
+
 const PID_FILE: &str = "/tmp/resource_control.pid";
 
 /// CLI arguments for resource control.
 #[derive(Parser, Debug)]
 #[command(
-    name = "resource_control",
-    about = "Control server CPU and memory usage"
+    about = "Control server CPU and memory usage",
+    subcommand_negates_reqs = true
 )]
-struct Args {
+struct Cli {
+    /// Start the daemon (default: check running status)
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Command {
+    /// Start the resource control daemon in the background
+    Start(StartArgs),
+    /// Stop the running instance
+    Stop,
+}
+
+/// Arguments for the start subcommand.
+#[derive(Args, Debug)]
+struct StartArgs {
     /// Target CPU usage percentage (0-100)
     #[arg(short, long, default_value_t = 50.0)]
     cpu_target: f32,
@@ -35,10 +59,6 @@ struct Args {
     /// Nice value (0-19, higher = lower priority)
     #[arg(short, long, default_value_t = 19)]
     nice: i32,
-
-    /// Stop the running instance
-    #[arg(long)]
-    stop: bool,
 }
 
 fn parse_ram_range(raw: &str) -> Result<(u64, u64), String> {
@@ -116,8 +136,9 @@ fn stop_instance() {
             std::process::exit(1);
         }
         eprintln!(
-            "Error: PID {} is not a resource_control process; refusing to kill it",
-            pid
+            "Error: PID {} is not a {} process; refusing to kill it",
+            pid,
+            program_name()
         );
         std::process::exit(1);
     }
@@ -151,19 +172,22 @@ fn stop_instance() {
 }
 
 fn main() {
-    let args = Args::parse();
+    let args = Cli::parse();
 
-    if args.stop {
-        stop_instance();
-        return;
+    match args.command {
+        Some(Command::Start(start)) => start_daemon(start),
+        Some(Command::Stop) => stop_instance(),
+        None => check_status(),
     }
+}
 
-    if let Err(e) = validate_cpu_target(args.cpu_target) {
+fn start_daemon(start: StartArgs) {
+    if let Err(e) = validate_cpu_target(start.cpu_target) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 
-    let ram_range = match parse_ram_range(&args.ram) {
+    let ram_range = match parse_ram_range(&start.ram) {
         Ok(range) => range,
         Err(e) => {
             eprintln!("Error: {}", e);
@@ -171,15 +195,19 @@ fn main() {
         }
     };
 
-    if let Err(e) = validate_nice(args.nice) {
+    if let Err(e) = validate_nice(start.nice) {
         eprintln!("Error: {}", e);
         std::process::exit(1);
     }
 
     let (ram_min, ram_max) = ram_range;
     println!(
-        "Starting resource control: CPU target={}%, RAM range={}-{}%, nice={}",
-        args.cpu_target, ram_min, ram_max, args.nice
+        "Starting {}: CPU target={}%, RAM range={}-{}%, nice={}",
+        program_name(),
+        start.cpu_target,
+        ram_min,
+        ram_max,
+        start.nice
     );
 
     Daemonize::new()
@@ -187,11 +215,11 @@ fn main() {
         .start()
         .unwrap_or_else(|_| {
             eprintln!("Error: another instance is already running");
-            eprintln!("Hint: use --stop to stop the running instance");
+            eprintln!("Hint: use 'stop' to stop the running instance");
             std::process::exit(1);
         });
 
-    setpriority_process(None, args.nice).unwrap_or_else(|e| {
+    setpriority_process(None, start.nice).unwrap_or_else(|e| {
         eprintln!("Warning: failed to set nice value: {}", e);
     });
 
@@ -205,7 +233,7 @@ fn main() {
         }
     }
 
-    match spawn_cpu_threads(args.cpu_target) {
+    match spawn_cpu_threads(start.cpu_target) {
         Ok(cpu_handles) => handles.extend(cpu_handles),
         Err(e) => {
             eprintln!("Failed to spawn CPU threads: {:?}", e);
@@ -216,6 +244,47 @@ fn main() {
     for handle in handles {
         let _ = handle.join();
     }
+}
+
+/// Reports whether a resource_control daemon is currently running.
+fn check_status() {
+    let name = program_name();
+    let pid = std::fs::read_to_string(PID_FILE)
+        .ok()
+        .and_then(|contents| contents.trim().parse::<u32>().ok());
+
+    match pid {
+        Some(pid) if is_resource_control_pid(pid) => {
+            println!("Running: {} is active (PID {})", name, pid);
+            println!("Use '{} stop' to stop it", name);
+        }
+        Some(_) => {
+            println!("Not running: stale PID file found");
+            let _ = std::fs::remove_file(PID_FILE);
+            print_start_hint();
+        }
+        None => {
+            print_start_hint();
+        }
+    }
+}
+
+/// Prints how to start the daemon with all available parameters.
+fn print_start_hint() {
+    let name = program_name();
+    println!("Not running");
+    println!();
+    println!("Start the resource control daemon with:");
+    println!("  {} start [OPTIONS]", name);
+    println!();
+    println!("Options:");
+    println!("  -c, --cpu-target <FLOAT>  Target CPU usage percentage (default: 50.0)");
+    println!("  -m, --ram <STRING>        RAM usage range \"min-max\" (default: \"45-55\")");
+    println!("  -n, --nice <INT>          Nice value 0-19 (default: 19)");
+    println!("  -h, --help                Print help");
+    println!();
+    println!("Example:");
+    println!("  {} start --cpu-target 60 --ram 40-60", name);
 }
 
 #[global_allocator]

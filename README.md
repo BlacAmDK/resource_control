@@ -9,23 +9,37 @@
 
 ## 使用方法
 
-### 默认运行
+### 查看运行状态（默认）
 
 ```bash
 resource_control
 ```
 
-### 自定义参数
+无参数时检查后台是否已有实例在运行，并显示启动指引。
+
+### 启动守护进程
+
+```bash
+resource_control start
+```
+
+### 自定义参数启动
 
 ```bash
 # 设置 CPU 目标为 60%，内存范围 40-60%
-resource_control --cpu-target 60 --ram 40-60
+resource_control start --cpu-target 60 --ram 40-60
 
 # 设置 nice 值（默认 19，最低优先级）
-resource_control --nice 15
+resource_control start --nice 15
 
 # 查看帮助
-resource_control --help
+resource_control start --help
+```
+
+### 停止运行实例
+
+```bash
+resource_control stop
 ```
 
 ### CLI 参数
@@ -35,13 +49,7 @@ resource_control --help
 | `-c`, `--cpu-target` | CPU 目标使用率 (0-100) | 50 |
 | `-m`, `--ram` | 内存使用范围 "min-max" | 45-55 |
 | `-n`, `--nice` | Nice 值 (0-19，越高优先级越低) | 19 |
-| `--stop` | 停止正在运行的实例 | false |
 
-程序默认以守护进程模式在后台运行。
-
-```bash
-resource_control
-resource_control --stop                        # 停止
-```
+程序以守护进程模式在后台运行。程序名通过运行时的二进制文件名动态获取，重命名二进制后所有提示与子命令自动跟随。
 
 

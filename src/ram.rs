@@ -27,6 +27,22 @@ pub enum AdjustResult {
     Freed(u64),
 }
 
+/// Max blocks a pool can hold: each block is 0.25% of RAM, so ram_max% needs
+/// ram_max * 4 blocks. Independent of total memory to avoid oversized reserves.
+fn pool_capacity(ram_max: u64) -> usize {
+    (ram_max as usize) * 4
+}
+
+/// Caps the number of blocks allocated per iteration to avoid memory bursts.
+/// Only used for allocation; freeing is never capped.
+fn blocks_to_allocate(blocks: i64) -> usize {
+    if blocks > 0 {
+        (blocks as usize).min(4)
+    } else {
+        0
+    }
+}
+
 impl RamController {
     /// Creates a new RAM controller with the specified target range.
     pub fn new(target_range: (u64, u64)) -> Result<Self, AppError> {
@@ -49,9 +65,9 @@ impl RamController {
         let usage_percent = Self::calculate_usage_percent(&system);
 
         Ok(Self {
-            pool: Vec::with_capacity(
-                (total_memory as usize / 100 * target_range.1 as usize).max(1),
-            ),
+            // Capacity is the max blocks needed: each block holds memory_one_percent/4
+            // (0.25%), so reaching ram_max% requires ram_max * 4 blocks.
+            pool: Vec::with_capacity(pool_capacity(target_range.1)),
             target_range,
             target_mid: (target_range.0 + target_range.1) / 2,
             usage_percent,
@@ -98,16 +114,26 @@ impl RamController {
     }
 
     fn refresh(&mut self) {
-        self.system.refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
+        self.system
+            .refresh_memory_specifics(MemoryRefreshKind::nothing().with_ram());
 
         // memory hotplug? free memory pool
         if self.system.total_memory() != self.last_total_memory {
-            self.pool.clear();
-            self.last_total_memory = self.system.total_memory();
-            self.memory_one_percent = self.last_total_memory / 100;
+            self.refresh_total_memory(self.system.total_memory());
         }
 
         self.usage_percent = Self::calculate_usage_percent(&self.system);
+    }
+
+    /// Recomputes state after total memory changes (hotplug add/remove).
+    ///
+    /// Drops the whole pool so blocks are resized to the new total. Guards
+    /// `memory_one_percent` to stay >= 4 so a pathologically tiny total never
+    /// yields zero-size blocks that can never reach the target.
+    fn refresh_total_memory(&mut self, new_total: u64) {
+        self.pool.clear();
+        self.last_total_memory = new_total;
+        self.memory_one_percent = (new_total / 100).max(4);
     }
 
     fn calculate_usage_percent(system: &System) -> u64 {
@@ -118,7 +144,7 @@ impl RamController {
 
     fn adjust_pool(&mut self, blocks: i64) {
         if blocks > 0 {
-            let blocks_to_allocate = (blocks as usize).min(100);
+            let blocks_to_allocate = blocks_to_allocate(blocks);
             let size = (self.memory_one_percent / 4) as usize;
             for _ in 0..blocks_to_allocate {
                 let mut v = vec![0u32; size];
@@ -128,6 +154,8 @@ impl RamController {
                 self.pool.push(v);
             }
         } else if blocks < 0 && !self.pool.is_empty() {
+            // Free everything requested at once so memory is released
+            // immediately if other processes suddenly need it.
             let blocks_to_free = ((-blocks) as usize).min(self.pool.len());
             for _ in 0..blocks_to_free {
                 self.pool.pop();
@@ -170,7 +198,7 @@ mod tests {
         controller.last_total_memory = u64::MAX;
         controller.pool.push(vec![0u32; 10]);
         assert_eq!(controller.pool.len(), 1);
-        let _ = controller.refresh();
+        controller.refresh();
         assert_eq!(controller.pool.len(), 0);
     }
 
@@ -180,8 +208,19 @@ mod tests {
         controller.last_total_memory = 0;
         controller.pool.push(vec![0u32; 10]);
         assert_eq!(controller.pool.len(), 1);
-        let _ = controller.refresh();
+        controller.refresh();
         assert_eq!(controller.pool.len(), 0);
+    }
+
+    #[test]
+    fn test_refresh_total_memory_guards_zero_one_percent() {
+        // A hotplug that shrinks total memory below 100 bytes must not produce
+        // zero-size blocks; memory_one_percent stays at least 4.
+        let mut controller = RamController::with_test_values((45, 55), 1_000_000, 50);
+        controller.pool.push(vec![0u32; 10]);
+        controller.refresh_total_memory(50);
+        assert_eq!(controller.pool.len(), 0);
+        assert!(controller.memory_one_percent >= 4);
     }
 
     #[test]
@@ -220,5 +259,50 @@ mod tests {
         // Actual runtime behavior would require mocking System
         let controller = RamController::with_test_values((45, 55), 1_000_000, 30);
         assert_eq!(controller.usage_percent, 30);
+    }
+
+    #[test]
+    fn test_pool_capacity_scales_with_target() {
+        // Capacity only depends on ram_max (0.25% blocks => ram_max * 4), not total memory
+        assert_eq!(pool_capacity(55), 220);
+        assert_eq!(pool_capacity(100), 400);
+        assert_eq!(pool_capacity(1), 4);
+    }
+
+    #[test]
+    fn test_blocks_to_allocate_capped() {
+        assert_eq!(blocks_to_allocate(100), 4);
+        assert_eq!(blocks_to_allocate(2), 2);
+        assert_eq!(blocks_to_allocate(0), 0);
+    }
+
+    #[test]
+    fn test_adjust_pool_allocates_limited_blocks() {
+        let mut controller = RamController::with_test_values((45, 55), 1_000_000, 40);
+        controller.adjust_pool(100);
+        assert_eq!(controller.pool.len(), 4);
+    }
+
+    #[test]
+    fn test_adjust_pool_frees_limited_blocks() {
+        let mut controller = RamController::with_test_values((45, 55), 1_000_000, 60);
+        controller.adjust_pool(10);
+        assert_eq!(controller.pool.len(), 4);
+        // Freeing is NOT capped: all requested blocks are released at once
+        // so memory frees immediately when other processes need it.
+        controller.adjust_pool(-10);
+        assert_eq!(controller.pool.len(), 0);
+    }
+
+    #[test]
+    fn test_adjust_pool_frees_all_blocks_in_one_step() {
+        let mut controller = RamController::with_test_values((45, 55), 1_000_000, 60);
+        for _ in 0..10 {
+            controller.pool.push(vec![0u32; 10]);
+        }
+        assert_eq!(controller.pool.len(), 10);
+        // Even a huge free request must release everything immediately.
+        controller.adjust_pool(-1000);
+        assert_eq!(controller.pool.len(), 0);
     }
 }

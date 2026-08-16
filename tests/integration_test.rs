@@ -1,6 +1,5 @@
 //! Integration tests for CLI argument parsing.
 
-use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
 
 #[test]
@@ -50,10 +49,7 @@ fn test_help_shows_nice() {
         .output()
         .expect("Failed to run cargo");
 
-    let combined = format!(
-        "{}",
-        String::from_utf8_lossy(&output.stdout)
-    );
+    let combined = format!("{}", String::from_utf8_lossy(&output.stdout));
 
     assert!(
         combined.contains("--nice") || combined.contains("nice"),
@@ -70,8 +66,24 @@ fn test_valid_ram_range_no_error() {
 
     std::thread::sleep(std::time::Duration::from_millis(300));
     let _ = child.kill();
+    let _ = child.wait();
 
-    let status = child.wait().expect("Failed to wait");
-    // Process killed by us, not crashed
-    assert!(status.signal().is_some() || status.success());
+    // The daemon double-forks, so killing `cargo run` leaves the daemon alive.
+    // Clean it up explicitly to avoid leaking a CPU/RAM-burning process.
+    let stop = Command::new("cargo")
+        .args(["run", "--", "--stop"])
+        .output()
+        .expect("Failed to run --stop");
+
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&stop.stdout),
+        String::from_utf8_lossy(&stop.stderr)
+    );
+    // Either it was stopped cleanly, or the PID file was stale/absent.
+    assert!(
+        combined.contains("Stopped") || combined.contains("no running instance"),
+        "unexpected --stop output: {}",
+        combined
+    );
 }

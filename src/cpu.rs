@@ -31,7 +31,8 @@ impl CpuController {
 
     /// Runs the CPU control loop indefinitely.
     pub fn run(&mut self) {
-        // Bind thread to the specific CPU core
+        // Bind thread to the specific CPU core (silently ignore failures:
+        // daemonized stderr is redirected to /dev/null anyway)
         core_affinity::set_for_current(core_affinity::CoreId { id: self.core_id });
 
         let mut system = System::new();
@@ -52,35 +53,17 @@ impl CpuController {
                 self.consecutive_over_target = 0;
             }
 
-            // P (比例) 项：快速响应当前误差
-            // 系数 0.1 避免剧烈震荡
-            // 当 error 为负（高于目标）时，此项会使 adjustment 变负，降低 work_ratio
-            let p_term = error * 0.1;
-
             // I (积分) 项：累积误差，消除稳态偏移
-            // 例如：持续低于目标时，integral_error 会累积增大
             // 限制在 [-0.1, 0.1] 防止积分饱和
             self.integral_error += error * 0.05;
-            let i_term = self.integral_error.clamp(-0.1, 0.1);
+            self.integral_error = self.integral_error.clamp(-0.1, 0.1);
 
-            // 合成调整量 = P + I
-            // 限制在 [-0.15, 0.15] 避免单步调整过大
-            let adjustment = (p_term + i_term).clamp(-0.15, 0.15);
-
-            // 基础比例 = 目标百分比
-            let base_ratio = self.target_usage / 100.0;
-
-            // 计算工作比例
-            // 上限：min(target * 1.5, 100%)，允许短时超调以快速逼近目标
-            // 下限：max(target * 0.5, 0%)，确保下界不超过上界
-            let upper = (base_ratio * 1.5).min(1.0);
-            let lower = (base_ratio * 0.5).max(0.0).min(upper);
-            let mut work_ratio = (base_ratio + adjustment).clamp(lower, upper);
-
-            // 如果连续 3 个周期高于目标，强制让出所有 CPU 资源
-            if self.consecutive_over_target >= 3 {
-                work_ratio = 0.0;
-            }
+            let work_ratio = compute_work_ratio(
+                self.target_usage,
+                cpu_usage,
+                self.integral_error,
+                self.consecutive_over_target,
+            );
 
             let cycle_duration = MINIMUM_CPU_UPDATE_INTERVAL;
             let work_duration =
@@ -98,6 +81,38 @@ impl CpuController {
             thread::sleep(sleep_duration);
         }
     }
+}
+
+/// Computes the work ratio for a cycle from measured usage and controller state.
+///
+/// Returns the work ratio in [0, upper]. Lower bound is 0 so that when the core
+/// is saturated by other processes, the controller can fully yield instead of
+/// competing with business workloads.
+fn compute_work_ratio(
+    target_usage: f32,
+    cpu_usage: f32,
+    integral_error: f32,
+    consecutive_over_target: u32,
+) -> f32 {
+    // 误差 = 目标 - 当前测量值（正值=低于目标，负值=高于目标）
+    let error = target_usage - cpu_usage;
+
+    // P (比例) 项 + I (积分) 项，限制幅度防止震荡/饱和
+    let p_term = error * 0.1;
+    let i_term = (integral_error + error * 0.05).clamp(-0.1, 0.1);
+    let adjustment = (p_term + i_term).clamp(-0.15, 0.15);
+
+    // 上限允许短时超调；下限为 0，过载时完全让出
+    let base_ratio = target_usage / 100.0;
+    let upper = (base_ratio * 1.5).min(1.0);
+    let mut work_ratio = (base_ratio + adjustment).clamp(0.0, upper);
+
+    // 连续 3 个周期高于目标，强制让出所有 CPU 资源
+    if consecutive_over_target >= 3 {
+        work_ratio = 0.0;
+    }
+
+    work_ratio
 }
 
 /// Spawns CPU control threads for all available cores.
@@ -145,5 +160,33 @@ mod tests {
         let controller = CpuController::new(1, 55.0);
         let ratio = controller.target_usage / 100.0;
         assert!((ratio - 0.55).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn test_work_ratio_never_exceeds_upper_bound() {
+        // target=60: upper = min(0.9, 1.0) = 0.9
+        let ratio = compute_work_ratio(60.0, 0.0, 0.0, 0);
+        assert!(ratio <= 0.9);
+    }
+
+    #[test]
+    fn test_work_ratio_forced_to_zero_after_three_over_target() {
+        // Three consecutive cycles above target must release all CPU
+        let ratio = compute_work_ratio(60.0, 100.0, 0.0, 3);
+        assert_eq!(ratio, 0.0);
+    }
+
+    #[test]
+    fn test_work_ratio_increases_when_below_target() {
+        // Below target (0% usage) should push ratio above base 0.6
+        let ratio = compute_work_ratio(60.0, 0.0, 0.0, 0);
+        assert!(ratio > 0.6);
+    }
+
+    #[test]
+    fn test_work_ratio_reduces_when_over_target() {
+        // Over target (100% usage) should reduce ratio below base 0.6
+        let ratio = compute_work_ratio(60.0, 100.0, 0.0, 0);
+        assert!(ratio < 0.6);
     }
 }

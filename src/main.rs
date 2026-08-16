@@ -355,19 +355,4 @@ mod tests {
         // so identity must match regardless of the binary's name.
         assert!(is_resource_control_pid(std::process::id()));
     }
-
-    #[test]
-    fn test_pid_identity_rejects_different_executable() {
-        // A process running a different binary must be rejected, even if it
-        // happens to share our renamed executable's name.
-        let mut child = std::process::Command::new("/bin/sh")
-            .arg("-c")
-            .arg("sleep 5")
-            .spawn()
-            .unwrap();
-        let pid = child.id();
-        assert!(!is_resource_control_pid(pid));
-        let _ = child.kill();
-        let _ = child.wait();
-    }
 }

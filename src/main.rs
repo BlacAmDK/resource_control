@@ -4,6 +4,7 @@
 //! target ranges by spawning control threads for each resource.
 
 mod cpu;
+mod cgroup;
 mod error;
 mod ram;
 
@@ -14,6 +15,10 @@ use ram::spawn_ram_thread;
 use rustix::process::setpriority_process;
 use std::path::Path;
 use std::time::Duration;
+use std::sync::Arc;
+use signal_hook::iterator::Signals;
+use signal_hook::consts::SIGINT;
+use signal_hook::consts::SIGTERM;
 
 /// Returns the running binary's name (e.g. "resource_control").
 fn program_name() -> String {
@@ -223,6 +228,16 @@ fn start_daemon(start: StartArgs) {
         eprintln!("Warning: failed to set nice value: {}", e);
     });
 
+    // Attempt to apply cgroup limits (non-fatal)
+    let cg = match cgroup::Cgroup::setup(start.cpu_target, ram_max) {
+        Ok(cg) => Some(Arc::new(cg)),
+        Err(e) => {
+            eprintln!("Warning: failed to apply cgroup limits: {:?}", e);
+            eprintln!("Proceeding without kernel-level cgroup limits.");
+            None
+        }
+    };
+
     let mut handles = vec![];
 
     match spawn_ram_thread(ram_range) {
@@ -239,6 +254,31 @@ fn start_daemon(start: StartArgs) {
             eprintln!("Failed to spawn CPU threads: {:?}", e);
             std::process::exit(1);
         }
+    }
+
+    // Setup signal handler to perform cleanup on exit
+    if let Some(cg_ref) = cg.clone() {
+        let signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
+        std::thread::spawn(move || {
+            for sig in signals.forever() {
+                eprintln!("Received signal {}, cleaning up...", sig);
+                if let Err(e) = cg_ref.cleanup() {
+                    eprintln!("Warning: cgroup cleanup failed: {:?}", e);
+                }
+                let _ = std::fs::remove_file(PID_FILE);
+                std::process::exit(0);
+            }
+        });
+    } else {
+        // Still install a basic handler that removes PID file
+        let signals = Signals::new(&[SIGINT, SIGTERM]).unwrap();
+        std::thread::spawn(move || {
+            for sig in signals.forever() {
+                eprintln!("Received signal {}, exiting...", sig);
+                let _ = std::fs::remove_file(PID_FILE);
+                std::process::exit(0);
+            }
+        });
     }
 
     for handle in handles {
